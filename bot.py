@@ -121,8 +121,7 @@ async def hut_chosen(callback: CallbackQuery, state: FSMContext):
     await state.update_data(hut=hut)
     await callback.message.answer("Введите дату бронирования (дд.мм.гггг):")
     await state.set_state(BookingState.date)
-
-await callback.answer()
+    await callback.answer()
 
 # --- Выбор даты ---
 @dp.message(BookingState.date)
@@ -223,8 +222,7 @@ async def phone_entered(message: Message, state: FSMContext):
         f"Стоимость аренды: {price}₽/час × {hours} ч = <b>{total_cost}₽</b>\n\n"
         f"🔗 <b>Реквизиты для оплаты</b>: <code>2202202202202202</code> (Сбербанк)\n"
         f"В комментарии укажите: ФИО и дату брони.\n\n"
-
-"Пожалуйста, оплатите в течение 30 минут и отправьте чек в ответ на это сообщение."
+        "Пожалуйста, оплатите в течение 30 минут и отправьте чек в ответ на это сообщение."
     )
     await message.answer(pay_info, parse_mode="HTML")
     await state.set_state(BookingState.payment)
@@ -274,5 +272,5 @@ async def main():
     print("✅ Бот запущен и слушает...")
     await dp.start_polling(bot)
 
-if name == "__main__":
+if __name__ == "__main__":
     asyncio.run(main())
