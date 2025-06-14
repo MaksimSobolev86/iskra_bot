@@ -1,6 +1,6 @@
 import os
 import json
-import re
+import datetime
 import asyncio
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -13,12 +13,10 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from dotenv import load_dotenv
-
 from aiogram_calendar import SimpleCalendar, SimpleCalendarCallback
-
 import gspread
 
-# --- Google Sheets: Render-friendly ---
+# --- Google Sheets: Render или локально ---
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 if GOOGLE_CREDS_JSON:
     from oauth2client.service_account import ServiceAccountCredentials
@@ -36,11 +34,12 @@ spreadsheet = gc.open("besedka_booking")
 huts_sheet = spreadsheet.worksheet("huts")
 bookings_sheet = spreadsheet.worksheet("bookings")
 
-# --- FSM (states) ---
+# --- FSM (состояния) ---
 class BookingState(StatesGroup):
     hut = State()
     date = State()
-    time = State()
+    time_from = State()
+    time_to = State()
     name = State()
     phone = State()
     payment = State()
@@ -48,27 +47,22 @@ class BookingState(StatesGroup):
 # --- Бот ---
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_USER_ID = 408892234  # Твой id для чека
+ADMIN_USER_ID = 408892234
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 
-# --- Кнопки ---
 main_kb = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
     [KeyboardButton(text="📅 Забронировать беседку")],
     [KeyboardButton(text="📋 Посмотреть беседки")],
     [KeyboardButton(text="☎️ Позвонить администратору")]
 ])
 
-# --- Команда /start ---
+# --- /start ---
 @dp.message(F.text.lower() == "/start")
 async def start_handler(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(
-        "Привет! Я бот для аренды беседок 🌿\n\n"
-        "Выберите действие 👇",
-        reply_markup=main_kb
-    )
+    await message.answer("Привет! Я бот для аренды беседок 🌿\n\nВыберите действие 👇", reply_markup=main_kb)
 
 # --- Просмотр беседок ---
 @dp.message(F.text == "📋 Посмотреть беседки")
@@ -89,13 +83,12 @@ async def show_huts(message: Message):
 @dp.message(F.text == "☎️ Позвонить администратору")
 async def call_admin(message: Message):
     phone = "+79991234567"
-    # Синим нельзя, но в код-блоке удобно копировать:
     await message.answer(
-        f"Связаться с администратором:\n<code>{phone}</code>",
+        f"Связаться с администратором: <code>{phone}</code>",
         parse_mode="HTML"
     )
 
-# --- Начать бронирование ---
+# --- Начать бронирование: выбрать беседку ---
 @dp.message(F.text == "📅 Забронировать беседку")
 async def choose_hut(message: Message, state: FSMContext):
     huts = huts_sheet.get_all_records()
@@ -108,75 +101,124 @@ async def choose_hut(message: Message, state: FSMContext):
     await message.answer("Выберите беседку:", reply_markup=kb)
     await state.set_state(BookingState.hut)
 
-# --- Выбор беседки ---
-@dp.callback_query(lambda c: c.data and c.data.startswith("hut_"), BookingState.hut)
+@dp.callback_query(lambda c: c.data and c.data.startswith("hut_"))
 async def hut_chosen(callback: CallbackQuery, state: FSMContext):
     idx = int(callback.data.split("_")[1])
     huts = huts_sheet.get_all_records()
     hut = huts[idx]
     await state.update_data(hut=hut)
-    # Вместо текста вызываем календарь!
     await callback.message.answer(
-        "📆 Выберите дату бронирования:",
-        reply_markup=await SimpleCalendar().start_calendar()
+        "Выберите дату бронирования:",
+        reply_markup=await SimpleCalendar(min_date=datetime.date.today()).start_calendar()
     )
+    await callback.answer()
     await state.set_state(BookingState.date)
-    await callback.answer()
 
-# --- Обработка выбора даты (aiogram_calendar) ---
-@dp.callback_query(SimpleCalendarCallback.filter(), BookingState.date)
-async def process_date(callback: CallbackQuery, callback_data: SimpleCalendarCallback, state: FSMContext):
+# --- Выбор даты (через календарь) ---
+@dp.callback_query(SimpleCalendarCallback.filter())
+async def process_date(callback_query: CallbackQuery, callback_data: SimpleCalendarCallback, state: FSMContext):
     selected_date = callback_data.selected_date
-    date_str = selected_date.strftime("%d.%m.%Y")
-    await state.update_data(date=date_str)
-    await callback.message.answer(
-        f"✅ Дата выбрана: {date_str}\n\nВведите время (например: 12:00–17:00):"
+    await state.update_data(date=selected_date.strftime("%d.%m.%Y"))
+    await callback_query.message.answer(
+        f"✅ Дата выбрана: {selected_date.strftime('%d.%m.%Y')}\nТеперь выберите время начала аренды:",
+        reply_markup=make_time_keyboard()
     )
-    await state.set_state(BookingState.time)
+    await state.set_state(BookingState.time_from)
+    await callback_query.answer()
+
+# --- Клавиатура времени (30 мин шаг) ---
+def make_time_keyboard():
+    times = []
+    h = 8
+    m = 0
+    while h < 21 or (h == 21 and m == 0):
+        times.append(f"{h:02d}:{m:02d}")
+        m += 30
+        if m == 60:
+            m = 0
+            h += 1
+    # 4 кнопки в строке
+    keyboard = []
+    row = []
+    for idx, t in enumerate(times, 1):
+        row.append(InlineKeyboardButton(text=t, callback_data=f"timefrom_{t}"))
+        if idx % 4 == 0 or t == times[-1]:
+            keyboard.append(row)
+            row = []
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def make_time_to_keyboard(selected_from):
+    # Предлагаем окончания только после selected_from + 2 часа, не позже 21:00
+    h_from, m_from = map(int, selected_from.split(":"))
+    from_minutes = h_from * 60 + m_from + 120  # минимум 2 часа
+    end_times = []
+    h = 8
+    m = 0
+    while h < 21 or (h == 21 and m == 0):
+        minutes = h * 60 + m
+        if minutes > from_minutes:
+            end_times.append(f"{h:02d}:{m:02d}")
+        m += 30
+        if m == 60:
+            m = 0
+            h += 1
+    # 4 кнопки в строке
+    keyboard = []
+    row = []
+    for idx, t in enumerate(end_times, 1):
+        row.append(InlineKeyboardButton(text=t, callback_data=f"timeto_{t}"))
+        if idx % 4 == 0 or t == end_times[-1]:
+            keyboard.append(row)
+            row = []
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# --- Выбор времени ОТ ---
+@dp.callback_query(lambda c: c.data and c.data.startswith("timefrom_"))
+async def time_from_chosen(callback: CallbackQuery, state: FSMContext):
+    t_from = callback.data.replace("timefrom_", "")
+    await state.update_data(time_from=t_from)
+    await callback.message.answer("Теперь выберите время окончания аренды:", reply_markup=make_time_to_keyboard(t_from))
+    await state.set_state(BookingState.time_to)
     await callback.answer()
 
-# --- Проверка и ввод времени ---
-@dp.message(BookingState.time)
-async def time_entered(message: Message, state: FSMContext):
-    time_pattern = r"(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})"
-    m = re.match(time_pattern, message.text.strip().replace('—', '-').replace('–', '-'))
-    if not m:
-        await message.answer("Введите время в формате: 12:00–17:00")
-        return
-
-    time_from, time_to = m.group(1), m.group(2)
-    h_from, m_from = map(int, time_from.split(":"))
-    h_to, m_to = map(int, time_to.split(":"))
-    total_minutes = (h_to * 60 + m_to) - (h_from * 60 + m_from)
-    if total_minutes < 120:
-        await message.answer("⏳ Минимальное время бронирования — 2 часа! Попробуйте снова.\nВведите время:")
-        return
-
-    # Проверка пересечений с уже забронированными слотами
+# --- Выбор времени ДО ---
+@dp.callback_query(lambda c: c.data and c.data.startswith("timeto_"))
+async def time_to_chosen(callback: CallbackQuery, state: FSMContext):
+    t_to = callback.data.replace("timeto_", "")
     data = await state.get_data()
-    hut = data["hut"]
-    date = data["date"]
+    t_from = data["time_from"]
+    # Проверка: чтобы интервал не пересекался с бронями и не был меньше 2ч
+    h_from, m_from = map(int, t_from.split(":"))
+    h_to, m_to = map(int, t_to.split(":"))
+    delta = (h_to * 60 + m_to) - (h_from * 60 + m_from)
+    if delta < 120:
+        await callback.message.answer("⏳ Минимальное время бронирования — 2 часа! Выберите другое время.")
+        return
 
+    # Проверка на пересечения с бронями
     bookings = bookings_sheet.get_all_records()
+    hut = data["hut"]["Название"]
+    date = data["date"]
     for booking in bookings:
-        if booking['Беседка'] == hut['Название'] and booking['дата'] == date:
-            booked_from = booking['время от'].replace(" ", "")
-            booked_to = booking['время до'].replace(" ", "")
-            bf_h, bf_m = map(int, booked_from.split(":"))
-            bt_h, bt_m = map(int, booked_to.split(":"))
-            # Проверка на пересечение по времени
-            if not ((h_to * 60 + m_to) <= (bf_h * 60 + bf_m) or (h_from * 60 + m_from) >= (bt_h * 60 + bt_m)):
-                busy = f"{booked_from}–{booked_to}"
-                await message.answer(
-                    f"❗ Эта беседка занята на {date} с {busy}.\nПопробуйте выбрать другое время или дату!"
+        if booking['Беседка'] == hut and booking['дата'] == date:
+            bf_h, bf_m = map(int, booking['время от'].split(":"))
+            bt_h, bt_m = map(int, booking['время до'].split(":"))
+            booked_from = bf_h * 60 + bf_m
+            booked_to = bt_h * 60 + bt_m
+            # Пересечение
+            if not (h_to * 60 + m_to <= booked_from or h_from * 60 + m_from >= booked_to):
+                busy = f"{booking['время от']}-{booking['время до']}"
+                await callback.message.answer(
+                    f"❗ Эта беседка уже занята на {date} с {busy}.\nПопробуйте выбрать другое время или дату!"
                 )
                 return
-
-    await state.update_data(time_from=time_from, time_to=time_to)
-    await message.answer("Введите ваше имя:")
+    await state.update_data(time_to=t_to)
+    await callback.message.answer("Введите ваше имя:")
     await state.set_state(BookingState.name)
+    await callback.answer()
 
-# --- Имя и телефон ---
+# --- Имя, телефон, подтверждение, оплата, чек ---
+
 @dp.message(BookingState.name)
 async def name_entered(message: Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
@@ -188,25 +230,15 @@ async def phone_entered(message: Message, state: FSMContext):
     phone = message.text.strip()
     await state.update_data(phone=phone)
     data = await state.get_data()
-
-    # Итоговая стоимость
     price = int(data["hut"]["Цена"])
     h_from, m_from = map(int, data["time_from"].split(":"))
     h_to, m_to = map(int, data["time_to"].split(":"))
     delta = (h_to * 60 + m_to) - (h_from * 60 + m_from)
     hours = delta // 60
-    minutes = delta % 60
-    if minutes > 30:
-        hours += 1
-    elif minutes > 0:
+    if delta % 60 != 0:
         hours += 0.5
-    if hours < 2:
-        await message.answer("⏳ Минимальное время бронирования — 2 часа! Попробуйте снова.\nВведите время:")
-        await state.set_state(BookingState.time)
-        return
     total_cost = int(price * hours)
 
-    # Вставка брони в таблицу
     bookings_sheet.append_row([
         data["hut"]["Название"],
         data["date"],
@@ -227,7 +259,6 @@ async def phone_entered(message: Message, state: FSMContext):
     await message.answer(pay_info, parse_mode="HTML")
     await state.set_state(BookingState.payment)
 
-# --- Обработка чека ---
 import random
 @dp.message(BookingState.payment, F.photo)
 async def process_check(message: Message, state: FSMContext):
@@ -251,7 +282,7 @@ async def process_check(message: Message, state: FSMContext):
         ),
         parse_mode="HTML"
     )
-    # Обновляем статус брони в таблице
+    # Обновляем статус
     bookings = bookings_sheet.get_all_records()
     for idx, row in enumerate(bookings, start=2):
         if (
