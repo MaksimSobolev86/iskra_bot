@@ -13,10 +13,12 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from dotenv import load_dotenv
-import gspread
-import random
 
-# --- Google Sheets: Render/локально ---
+from aiogram_calendar import SimpleCalendar, SimpleCalendarCallback
+
+import gspread
+
+# --- Google Sheets: Render-friendly ---
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 if GOOGLE_CREDS_JSON:
     from oauth2client.service_account import ServiceAccountCredentials
@@ -34,7 +36,7 @@ spreadsheet = gc.open("besedka_booking")
 huts_sheet = spreadsheet.worksheet("huts")
 bookings_sheet = spreadsheet.worksheet("bookings")
 
-# --- FSM (состояния) ---
+# --- FSM (states) ---
 class BookingState(StatesGroup):
     hut = State()
     date = State()
@@ -87,8 +89,9 @@ async def show_huts(message: Message):
 @dp.message(F.text == "☎️ Позвонить администратору")
 async def call_admin(message: Message):
     phone = "+79991234567"
+    # Синим нельзя, но в код-блоке удобно копировать:
     await message.answer(
-        f"Связаться с администратором: <code>{phone}</code>",
+        f"Связаться с администратором:\n<code>{phone}</code>",
         parse_mode="HTML"
     )
 
@@ -106,26 +109,31 @@ async def choose_hut(message: Message, state: FSMContext):
     await state.set_state(BookingState.hut)
 
 # --- Выбор беседки ---
-@dp.callback_query(lambda c: c.data and c.data.startswith("hut_"))
+@dp.callback_query(lambda c: c.data and c.data.startswith("hut_"), BookingState.hut)
 async def hut_chosen(callback: CallbackQuery, state: FSMContext):
     idx = int(callback.data.split("_")[1])
     huts = huts_sheet.get_all_records()
     hut = huts[idx]
     await state.update_data(hut=hut)
-    await callback.message.answer("Введите дату бронирования (дд.мм.гггг):")
+    # Вместо текста вызываем календарь!
+    await callback.message.answer(
+        "📆 Выберите дату бронирования:",
+        reply_markup=await SimpleCalendar().start_calendar()
+    )
     await state.set_state(BookingState.date)
     await callback.answer()
 
-# --- Выбор даты ---
-@dp.message(BookingState.date)
-async def date_entered(message: Message, state: FSMContext):
-    text = message.text.strip()
-    if not re.match(r"\d{2}\.\d{2}\.\d{4}", text):
-        await message.answer("Пожалуйста, введите дату в формате дд.мм.гггг.")
-        return
-    await state.update_data(date=text)
-    await message.answer("Введите время (например: 12:00–17:00):")
+# --- Обработка выбора даты (aiogram_calendar) ---
+@dp.callback_query(SimpleCalendarCallback.filter(), BookingState.date)
+async def process_date(callback: CallbackQuery, callback_data: SimpleCalendarCallback, state: FSMContext):
+    selected_date = callback_data.selected_date
+    date_str = selected_date.strftime("%d.%m.%Y")
+    await state.update_data(date=date_str)
+    await callback.message.answer(
+        f"✅ Дата выбрана: {date_str}\n\nВведите время (например: 12:00–17:00):"
+    )
     await state.set_state(BookingState.time)
+    await callback.answer()
 
 # --- Проверка и ввод времени ---
 @dp.message(BookingState.time)
@@ -144,6 +152,7 @@ async def time_entered(message: Message, state: FSMContext):
         await message.answer("⏳ Минимальное время бронирования — 2 часа! Попробуйте снова.\nВведите время:")
         return
 
+    # Проверка пересечений с уже забронированными слотами
     data = await state.get_data()
     hut = data["hut"]
     date = data["date"]
@@ -180,6 +189,7 @@ async def phone_entered(message: Message, state: FSMContext):
     await state.update_data(phone=phone)
     data = await state.get_data()
 
+    # Итоговая стоимость
     price = int(data["hut"]["Цена"])
     h_from, m_from = map(int, data["time_from"].split(":"))
     h_to, m_to = map(int, data["time_to"].split(":"))
@@ -218,6 +228,7 @@ async def phone_entered(message: Message, state: FSMContext):
     await state.set_state(BookingState.payment)
 
 # --- Обработка чека ---
+import random
 @dp.message(BookingState.payment, F.photo)
 async def process_check(message: Message, state: FSMContext):
     data = await state.get_data()
@@ -240,6 +251,7 @@ async def process_check(message: Message, state: FSMContext):
         ),
         parse_mode="HTML"
     )
+    # Обновляем статус брони в таблице
     bookings = bookings_sheet.get_all_records()
     for idx, row in enumerate(bookings, start=2):
         if (
