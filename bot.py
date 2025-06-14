@@ -1,7 +1,8 @@
 import asyncio
 import os
 import calendar
-from datetime import datetime, date as dt_date, time as dt_time
+import json
+from datetime import datetime, date as dt_date
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
@@ -26,9 +27,24 @@ WORK_END = 21
 # --- Инициализация ---
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 GS_KEY = os.getenv("GOOGLE_SHEETS_KEY")
 
-gc = gspread.service_account(filename=GS_KEY)
+if GOOGLE_CREDS_JSON:
+    from oauth2client.service_account import ServiceAccountCredentials
+    creds_dict = json.loads(GOOGLE_CREDS_JSON)
+    scope = [
+        'https://spreadsheets.google.com/feeds',
+        'https://www.googleapis.com/auth/drive'
+    ]
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    gc = gspread.authorize(creds)
+elif GS_KEY:
+    gc = gspread.service_account(filename=GS_KEY)
+else:
+    raise Exception("Нет настроек для Google Sheets!")
+
 spreadsheet = gc.open("besedka_booking")
 huts_sheet = spreadsheet.worksheet("huts")
 bookings_sheet = spreadsheet.worksheet("bookings")
