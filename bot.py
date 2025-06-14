@@ -187,7 +187,7 @@ async def show_huts(message: Message):
         return
     for hut in huts:
         text = (
-            f"<b>{hut['Беседка']}</b>\n"
+            f"<b>{hut['Название']}</b>\n"
             f"💰 {hut['Цена']}₽/час\n"
             f"📝 {hut.get('Описание', '')}"
         )
