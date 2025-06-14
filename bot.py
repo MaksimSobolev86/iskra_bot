@@ -204,7 +204,7 @@ async def choose_hut(message: Message, state: FSMContext):
         return
     builder = InlineKeyboardBuilder()
     for i, hut in enumerate(huts):
-        builder.button(text=hut['Беседка'], callback_data=f"choose_hut:{i}")
+        builder.button(text=hut['Название'], callback_data=f"choose_hut:{i}")
     await message.answer("Выберите беседку:", reply_markup=builder.as_markup())
     await state.set_state(Booking.choosing_hut)
 
@@ -213,9 +213,9 @@ async def hut_selected(callback: CallbackQuery, state: FSMContext):
     huts = huts_sheet.get_all_records()
     idx = int(callback.data.split(":")[1])
     hut = huts[idx]
-    await state.update_data(hut_name=hut['Беседка'], hut_price=hut['Цена'])
+    await state.update_data(hut_name=hut['Название'], hut_price=hut['Цена'])
     await callback.message.edit_text(
-        f"Вы выбрали: {hut['Беседка']}\nТеперь выберите дату:",
+        f"Вы выбрали: {hut['Название']}\nТеперь выберите дату:",
         reply_markup=build_calendar()
     )
     await state.set_state(Booking.choosing_date)
